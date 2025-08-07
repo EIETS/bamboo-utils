@@ -1,0 +1,193 @@
+#!/bin/bash
+
+function debug
+{
+    local IFS=
+    [ -n "$DEBUG" ] && for v in "${@}"; do echo $v; done >&2
+     return 0
+}
+
+function log_out
+{
+   local IFS=
+   if [ "$1" = "error" ]; then
+     printf "%b%s\t%s%b\n" "\e[31m" $1 "${*:2}" "\e[0m"
+   else
+     printf "%s\t%s\n" $1 "${*:2}"
+   fi
+}
+
+function check_current_dir
+{
+    debug "current_dir=$current_dir"
+    var_result=$(git config -l | grep "remote.origin.url=ssh://git@cdc-stash.calix.local:7999/ctu/bamboo_stages.git" )
+    [ -z $var_result ] && { log_out "error" "Current directory isn't a bamboo_stages repo";exit 1; }
+    bamboo_stages_path=$(git rev-parse --show-toplevel)
+    debug "bamboo_stages_path=${bamboo_stages_path}"
+}
+
+function push_files
+{
+	flag_files=$(git status |grep disabled.flag |awk '{print $NF}')
+	for flag_file in $flag_files;
+	do
+		#echo $flag_file
+		git add -A $flag_file
+	done
+	time=$(date "+%Y/%m/%d-%H:%M:%S")
+	git commit -m "disable and enable jobs at $time"
+	git push
+}
+
+function list_all_job_status
+{
+	for stage in "${stages[@]}";
+	do
+		debug "stage in list_all_job_status for loop is $stage"
+	    [ -f ${bamboo_stages_path}/${stage}/disabled.flag ] && echo -e "\nDISABLED:${stage}" || (echo -e "\n";echo -e "\033[0;32mENABLED:${stage}\033[0m")
+	    jobs=$(ls -l ${bamboo_stages_path}/${stage}/bamboo_jobs |awk '/^d/ {print $NF}')
+	    for job in $jobs;
+	    do
+	    	if [ -f ${bamboo_stages_path}/${stage}/bamboo_jobs/${job}/disabled.flag ];then
+	    		echo "--DISABLED:${job}"
+	    	elif [ -f ${stage}/disabled.flag ];then
+	    		echo "--ENABLED:${job}"
+	    	else
+	    	    echo -e "\033[0;32m--ENABLED:${job}\033[0m"
+	    	fi
+	    done
+	done
+
+}
+
+function enable_all_jobs
+{
+	for stage in "${stages[@]}";
+	do
+	    #echo "STAGE=$stage"
+	    $action ${bamboo_stages_path}/${stage}/disabled.flag 2> /dev/null
+	    jobs=$(ls -l ${bamboo_stages_path}/${stage}/bamboo_jobs |awk '/^d/ {print $NF}')
+	    debug "jobs=${jobs[@]}"
+	    #stage_jobs[$stage]=$jobs
+	    #echo "stage_jobs=${stage_jobs[$stage]}"
+	    for job in $jobs;
+	    do
+	    	$action ${bamboo_stages_path}/${stage}/bamboo_jobs/${job}/disabled.flag 2> /dev/null
+	    done
+	done
+
+}
+
+function enable_current_job
+{
+     debug "enable_current_job $PWD"
+     # add check if current path is a stage or job here
+     if [[ -d bamboo_jobs || -f bamboo_tasks.bash ]];then
+         $action disabled.flag 2> /dev/null
+     else
+     	echo -e "\033[0;31m current dir $PWD is not a stage or job. \033[0m"
+     fi
+}
+
+function enable_stage_job
+{
+	folder_name=$1
+	found_flag=false
+	#[[ -d ${bamboo_stages_path}/$folder_name ]] && found_flag=true && echo "working on $folder_name/ " && { $action ${folder_name}/disabled.flag 2> /dev/null; }
+	for stage in "${stages[@]}";
+	do
+        [[ $stage == $folder_name ]] && found_flag=true && debug "working on ${stage}" && { $action ${bamboo_stages_path}/${stage}/disabled.flag; }
+		jobs=$(ls -l ${bamboo_stages_path}/${stage}/bamboo_jobs |awk '/^d/ {print $NF}')
+		for job in $jobs;
+		do
+			[[ $job == $folder_name ]] && found_flag=true && debug "working on ${stage}/bamboo_jobs/${job}/" && { $action ${bamboo_stages_path}/${stage}/bamboo_jobs/${job}/disabled.flag; }
+		done
+	done
+    [[ $found_flag == false ]] && echo -e "\033[0;31m Can not find $folder_name  \033[0m"
+}
+
+#Main
+DEBUG=
+parameters=$@
+declare -a stages
+declare -A stage_jobs
+myName=`basename $0`
+debug "myName=$myName"
+current_dir=${PWD}
+[[ "batch_enable" == $myName ]] && action="rm -f"
+[[ "batch_disable" == $myName ]] && action="touch"
+
+man="
+ NAME
+	${myName}
+
+ SYNOPSIS
+	${myName} [-h] [-all] [<stage_name>] [<job_name>]
+
+ DESCRIPTION
+	The script helps to update status of all stages and jobs.You must execute it in bamboo_stages repo.
+	After ${myName}, it will show the status of all stages and jobs.Only the green jobs are enabled.
+	note:If you want to enable a job,the stage of it must also be enabled.
+
+	Then use command batch_push to add commit and push the disabled.flag files. OR git add,commit,push manually!
+
+	Mandatory Options:
+	  -all              help to $action disabled.flag file in all stages and jobs.
+	  -h                Show help
+
+
+ USAGE
+	1. ${myName:6} all disabled.flag file
+		${myName} -all
+	2. ${myName:6} some stages and jobs
+		${myName} job_name1  job_name2 job_name3 stage_name1 stage_name2
+		
+	3. ${myName:6} current_dir
+	   ${myName} .
+	4. show the enabled/disabled status
+	   ${myName}
+" 
+
+check_current_dir
+
+
+[[ "batch_push" == $myName ]] && push_files && exit $?
+#echo "action=$action"
+
+stages=$(ls -l ${bamboo_stages_path}/ |awk '/^d/ {print $NF}')
+debug "before ${stages[@]}"
+new_array=()
+for value in $stages
+do
+    [[ $value != 'common_functions' ]] && new_array+=($value)
+done
+stages=("${new_array[@]}")
+unset new_array
+debug "after ${stages[@]}"
+#debug ${new_array[@]}
+#[ -z "$parameters" ] && enable_current_job
+
+for para in $parameters;
+do
+	case $para in 
+		-all )
+            debug "working on all jobs"
+            enable_all_jobs
+            break
+            ;;
+        -h )
+            echo "$man"
+            exit 0
+            ;;
+        . )
+            debug "working on current directory"
+            enable_current_job
+            ;;
+        * )
+            debug "working on folder $para"
+            enable_stage_job $para
+            ;;
+        esac
+done
+list_all_job_status
+    

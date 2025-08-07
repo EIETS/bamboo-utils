@@ -1,0 +1,84 @@
+#! /bin/bash
+# bamboo local agent support tool
+# validate folder structure
+
+function debug
+{
+    local IFS=
+    [ -n "$DEBUG" ] && for v in "${@}"; do echo $v; done >&2
+     return 0
+}
+
+function log_out
+{
+   local IFS=
+   if [ "$1" = "error" ]; then
+     printf "%b%s\t%s%b\n" "\e[31m" $1 "${*:2}" "\e[0m"
+   else
+     printf "%s\t%s\n" $1 "${*:2}"
+   fi
+}
+
+function check_current_dir
+{
+    debug "current_dir=$current_dir"
+    var_result=$(git config -l | grep "remote.origin.url=ssh://git@cdc-stash.calix.local:7999/ctu/bamboo_stages.git" )
+    [ -z $var_result ] && { log_out "error" "Current directory isn't in a bamboo_stages repo";exit 1; }
+    bamboo_stages_path=$(git rev-parse --show-toplevel)
+    debug "bamboo_stages_path=${bamboo_stages_path}"
+}
+
+function do_check
+{
+    #this fuction will check 
+    #1. if stage is set in stage.sequence
+    #2. if stage has bamboo_jobs folder
+    #3. if each job has bamboo_tasks.bash file
+    #4. if all the .sh .bash file can be executed (This is warning)
+    #5. if still have old bamboo variables in the scripts.
+    #6. if has plan.host and stage.sequence
+    #7. if has two JOB with same name
+    
+    [[ ! -f ${stage_sequence_file} ]] && { result_flag='false'; log_out "error" "Can't find file ${stage_sequence_file}"; }
+    [[ ! -f ${plan_host_file} ]] && { result_flag='false'; log_out "error" "Can't find file ${plan_host_file}"; }
+    
+    stages=$(for d in ${bamboo_stages_path}/*; do [ -d $d ] && echo $d; done )
+    all_jobs_name=()
+    #debug ${stages[@]}
+    #exit 0
+    for stage in $stages;
+    do
+        stage_name=$(basename $stage)
+        [[ "common_functions" == ${stage_name} ]] && continue
+        #echo "stage_name=${stage_name}"
+        result=$(grep ^[[:space:]]*${stage_name}[[:space:]]*$ ${stage_sequence_file})
+        [ -z $result ] && { result_flag='false'; log_out "error" "stage $stage_name isn't list in stage.sequence, if you want to disable this stage,Please use command stages_disable or add file disabled.flag in the stage folder."; }
+        [[ ! -d ${stage}/bamboo_jobs ]] && { result_flag='false'; log_out "error" "Can't find folder ${stage}/bamboo_jobs";continue; }
+
+        jobs=$(for d in ${stage}/bamboo_jobs/*; do [ -d $d ] && echo $d; done )
+        for job in $jobs;
+        do
+            job_name=$(basename $job)
+            all_sh_files=$(ls -l ${job}/ |grep "[.sh|.bash]$" |awk '{print $NF}')
+            [[ ! -x ${job}/bamboo_tasks.bash ]] && { result_flag='false'; log_out "error" "Can't find ${job}/bamboo_tasks.bash"; }
+            [[ "${all_jobs_name[@]}" =~ "${job_name}" ]] && log_out "error" "Can't use same JOB NAME ${job_name} in different stage,Please rename ${job}"
+            all_jobs_name+=("${job_name}")
+            for sh_file in ${all_sh_files};
+            do
+                [[ ! -x ${job}/${sh_file} ]] && { log_out "Warning" "Please add executable permissions to the file ${job}/${sh_file}";chmod a+x ${job}/${sh_file}; }
+                var_result=$(grep "{bamboo\." ${job}/${sh_file})
+                [[ ! -z $var_result ]] && { result_flag='false'; log_out "error" "Still have old bamboo variables like {bamboo.xxx} in file ${job}/${sh_file}，Please Check!"; }
+            done
+        done
+    done
+}
+
+DEBUG=
+result_flag='true'
+current_dir=${PWD}
+check_current_dir
+stage_sequence_file="${bamboo_stages_path}/stage.sequence"
+plan_host_file="${bamboo_stages_path}/plan.host"
+do_check
+debug "result_flag_IN_SCRIPT=${result_flag}";
+[[ "false" == ${result_flag} ]] && exit 1 || echo "Success!"
